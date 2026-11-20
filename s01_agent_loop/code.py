@@ -50,15 +50,17 @@ load_dotenv(override=True)
 if os.getenv("ANTHROPIC_BASE_URL"):
     os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
-MODEL = os.environ["MODEL_ID"]
+client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL")) #配置对象的ApiKey
+MODEL = os.environ["MODEL_ID"] #指定模型id：gpt6.1-sol
 
+#判断不同平台使用不同的命令行命令
 ENVIRONMENT_PROMPT = (
     "Windows: the bash tool runs through cmd.exe; use cmd.exe syntax, not Unix "
     "Bash or PowerShell syntax"
     if os.name == "nt"
     else "Unix-like: the bash tool runs the system shell"
 )
+# 系统提示词
 SYSTEM = (
     f"You are a coding agent at {os.getcwd()}. Environment: {ENVIRONMENT_PROMPT}. "
     "Use bash to solve tasks. Act, don't explain."
