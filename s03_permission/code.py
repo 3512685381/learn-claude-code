@@ -158,24 +158,50 @@ TOOL_HANDLERS = {
 DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "> /dev/sda"]
 
 def check_deny_list(command: str) -> str | None:
+    # command 是模型交给 bash 的整条命令字符串。
+    # DENY_LIST 是预先定义好的列表，里面有 "sudo" 等禁止项。
     for pattern in DENY_LIST:
+        # in 做的是区分大小写的子串匹配。
+        # 比如 "sudo" in "sudo whoami" 的结果是 True。
         if pattern in command:
-            return f"Blocked: '{pattern}' is on the deny list"
+            # 找到第一项就返回原因，函数在这里结束。
+            return f"命中硬拒绝列表：{pattern}"
+
+    # 循环走完还没有命中，才走到这里。
+    # None 表示这一关没拦住，外层还会继续检查审批规则。
     return None
 
 
 # Gate 2: Rule matching - context-dependent checks
+# 相邻的字符串会拼成一条正则。这里拆成几段，方便读每一部分。
 DESTRUCTIVE_COMMAND_WORD = re.compile(
-    r"(?i)(?:^|[;&|()\n])\s*(?:rm|del)(?=\s|$|[;&|()])"
+    r"(?i)"                    # 忽略大小写，DEL 和 del 都能匹配。
+    r"(?:^|[;&|()\n])"         # 从字符串开头，或这些分隔符之后开始找。
+    r"\s*"                     # 命令前允许有零个或多个空白字符。
+    r"(?:rm|del)"              # 匹配 rm 或 del。
+    r"(?=\s|$|[;&|()])"        # 后面必须是空白、字符串结尾或指定分隔符。
+                              # (?=...) 只检查后面是什么，不把它算进匹配结果。
 )
 
-
+# 匹配 rm 和 del
 def contains_destructive_command(command: str) -> bool:
-    return bool(DESTRUCTIVE_COMMAND_WORD.search(command))
+    # search() 找到匹配时返回 Match 对象，找不到时返回 None。
+    match = DESTRUCTIVE_COMMAND_WORD.search(command)
+
+    # 转成布尔值，让规则表可以直接用它做判断。
+    return match is not None
 
 
 PERMISSION_RULES = [
     {"tools": ["read_file", "write_file", "edit_file"],
+     
+     # lambda args: 表达式 定义了一个接收 args 的函数，并把表达式的结果作为返回值。
+     # 这里 args 是工具调用的参数字典，例如 {"path": "../notes.txt"}。
+     # 1. 取出工具传来的路径。字典里没有 "path" 时，默认用 ""。
+     # 2. WORKDIR 是一个 Path 对象。这里的 / 用来拼接路径。
+     #    相对路径会接到 WORKDIR 后面，绝对路径则直接使用。
+     # 3. .resolve() 得到解析后的绝对路径，处理 ..、. 和符号链接。
+     # 4. .is_relative_to(WORKDIR) 判断目标是否等于工作区目录，或位于工作区目录下面。
      "check": lambda args: not (WORKDIR / args.get("path", "")).resolve().is_relative_to(WORKDIR),
      "message": "Writing outside workspace"},
     {"tools": ["bash"],
@@ -186,6 +212,11 @@ PERMISSION_RULES = [
 
 def check_rules(tool_name: str, args: dict) -> str | None:
     for rule in PERMISSION_RULES:
+        # 工具名不在这一条规则的适用范围内，就去看下一条。
+        # 例如 read_file 不会执行 bash 那条规则的 lambda。
+        # 取出规则里的函数，传入本次工具调用的参数字典
+        # rule 是 PERMISSION_RULES 列表里的一条规则，也就是一个 Python 字典。
+        # `rule["tools"]`、`rule["check"]`、`rule["message"]` 分别取出字典里的三个值。
         if tool_name in rule["tools"] and rule["check"](args):
             return rule["message"]
     return None
@@ -193,21 +224,38 @@ def check_rules(tool_name: str, args: dict) -> str | None:
 
 # Gate 3: User approval - wait for confirmation after rule match
 def ask_user(tool_name: str, args: dict, reason: str) -> str:
+
+    # 先显示为什么需要审批，再显示实际要执行的工具和参数。
     print(f"\n\033[33m[permission] {reason}\033[0m")
     print(f"   Tool: {tool_name}({args})")
+
+    # input() 会停在这里，等用户按回车提交输入。
+    # strip() 去掉首尾空白，lower() 转成小写。
     choice = input("   Allow? [y/N] ").strip().lower()
+
+    # 例如 " YES " 处理后变成 "yes"，会被批准。 
+    # 直接回车得到空字符串。空字符串和其他输入都默认拒绝。
     return "allow" if choice in ("y", "yes") else "deny"
 
 
 # Pipeline: all three gates chained
+# 串起前面的检查
+# block 是模型提出的一次工具调用。
+# block.name 是工具名，block.input 是参数字典。
 def check_permission(block) -> bool:
+
+    # 第一关：只有 bash 查硬拒绝列表。
     if block.name == "bash":
         reason = check_deny_list(block.input.get("command", ""))
         if reason:
             print(f"\n\033[31m[blocked] {reason}\033[0m")
             return False
+
+    # 第二关：判断这次调用是否触发审批规则。
     reason = check_rules(block.name, block.input)
     if reason:
+
+        # 第三关：把命中原因传给终端，由用户决定。
         decision = ask_user(block.name, block.input, reason)
         if decision == "deny":
             return False
